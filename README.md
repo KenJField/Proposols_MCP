@@ -5,11 +5,12 @@ A self-updating MCP server that combines FastMCP with Supabase to create an AI-p
 ## Features
 
 - **Hybrid Search**: Combines semantic (pgvector) and keyword (full-text) search for 30-40% better recall
-- **Self-Updating Knowledge Base**: Learns from validation feedback and automatically updates embeddings
-- **Multi-Tenant Isolation**: Row Level Security (RLS) ensures data isolation per tenant
-- **Validation Workflows**: Teams Adaptive Cards and email-based validation with automatic knowledge updates
+- **Self-Updating Knowledge Base**: AI learns from validation feedback and records learnings directly
+- **Single-Tenant Deployment**: One Supabase project per client for complete data isolation
+- **Validation Workflows**: Teams Adaptive Cards and email-based validation with AI processing
 - **Background Tasks**: Long-running proposal generation with progress reporting
 - **Audit Trail**: Complete tracking of all AI updates and changes
+- **Manual Review Gate**: Unvalidated experiences go to review queue before appearing in search
 
 ## Architecture
 
@@ -17,18 +18,24 @@ A self-updating MCP server that combines FastMCP with Supabase to create an AI-p
 AI Clients (Claude, Cursor, ChatGPT)
     ↓ MCP Protocol
 FastMCP Server (Python)
-    ↓ Authenticated Queries
+    ↓ Direct Queries
 Supabase (PostgreSQL + pgvector)
     ↓ Webhooks
-Edge Functions (TypeScript)
+Edge Functions (TypeScript) - Simple response storage
 ```
+
+**Key Simplifications:**
+- No multi-tenant complexity - each client gets their own Supabase project
+- No embedding queue - embeddings generated synchronously (<1 second)
+- AI-first processing - AI reads validation responses and calls `record_experience()` directly
+- Simple webhooks - just store raw responses, AI does the semantic work
 
 ## Quick Start
 
 ### 1. Prerequisites
 
 - Python 3.10+
-- Supabase project with PostgreSQL
+- Supabase project with PostgreSQL (one per client)
 - OpenAI API key
 - (Optional) SMTP server for email validation
 - (Optional) Microsoft Teams app for Teams validation
@@ -45,55 +52,45 @@ supabase db reset --db-url "postgresql://..."
 psql -h db.your-project.supabase.co -U postgres -d postgres -f proposal_mcp_schema.sql
 ```
 
-### 3. Set Up Auth Hooks
+**Note**: This is a single-tenant schema. Each client should get their own Supabase project.
 
-Create an Auth Hook in Supabase Dashboard (Authentication > Hooks) to inject `tenant_id` into JWTs:
-
-```sql
-CREATE OR REPLACE FUNCTION public.custom_access_token_hook(event jsonb)
-RETURNS jsonb
-LANGUAGE plpgsql
-AS $$
-DECLARE
-    claims jsonb;
-    user_tenant_id uuid;
-BEGIN
-    SELECT tenant_id INTO user_tenant_id
-    FROM user_tenants
-    WHERE user_id = (event->>'user_id')::uuid;
-    
-    claims := event->'claims';
-    
-    IF user_tenant_id IS NOT NULL THEN
-        claims := jsonb_set(claims, '{tenant_id}', to_jsonb(user_tenant_id));
-    END IF;
-    
-    event := jsonb_set(event, '{claims}', claims);
-    
-    RETURN event;
-END;
-$$;
-```
-
-### 4. Install Dependencies
+### 3. Install Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 5. Configure Environment
+### 4. Configure Environment
 
-Copy `.env.example` to `.env` and fill in your credentials:
+Create a `.env` file with your credentials:
 
 ```bash
-cp .env.example .env
+# Supabase Configuration
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+
+# OpenAI Configuration
+OPENAI_API_KEY=your-openai-api-key
+OPENAI_EMBEDDING_MODEL=text-embedding-3-small
+
+# Email Configuration (optional)
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_USER=your-smtp-user
+SMTP_PASSWORD=your-smtp-password
+EMAIL_FROM=proposals@yourcompany.com
+
+# Teams Configuration (optional)
+TEAMS_ACCESS_TOKEN=your-teams-access-token
+TEAMS_WEBHOOK_SECRET=your-teams-webhook-secret
+
+# Server Configuration
+STATELESS_HTTP=true
 ```
 
-Edit `.env` with your actual values.
+### 5. Deploy Edge Functions
 
-### 6. Deploy Edge Functions
-
-Deploy the Supabase Edge Functions:
+Deploy the Supabase Edge Functions (simplified - just store responses):
 
 ```bash
 # Install Supabase CLI if not already installed
@@ -108,33 +105,17 @@ supabase link --project-ref your-project-ref
 # Deploy functions
 supabase functions deploy validation-webhook
 supabase functions deploy validation-response
-supabase functions deploy process-embeddings
 ```
 
-### 7. Set Up Cron Job for Embeddings
+**Note**: The `process-embeddings` function is no longer needed - embeddings are generated synchronously.
 
-In Supabase Dashboard, enable `pg_cron` extension and create a cron job:
+### 6. Set Environment Variables for Functions
 
-```sql
--- Enable pg_cron
-CREATE EXTENSION IF NOT EXISTS pg_cron;
-
--- Schedule embedding processing every 30 seconds
-SELECT cron.schedule(
-    'process-embeddings',
-    '*/30 * * * * *',
-    $$
-    SELECT net.http_post(
-        url := 'https://your-project.supabase.co/functions/v1/process-embeddings',
-        headers := jsonb_build_object(
-            'Authorization', 'Bearer ' || current_setting('app.service_role_key')
-        )
-    );
-    $$
-);
+```bash
+supabase secrets set TEAMS_WEBHOOK_SECRET=your-secret
 ```
 
-### 8. Run the Server
+### 7. Run the Server
 
 ```bash
 python -m src.server
@@ -193,11 +174,11 @@ Add to `.cursor/mcp.json`:
 ### Search Tools
 
 - `search_internal_resources` - Search company resources (staff, tools, assets)
-- `search_experience` - Search AI knowledge base for past learnings
+- `search_experience` - Search AI knowledge base for past learnings (only validated experiences)
 
 ### Knowledge Management
 
-- `record_experience` - Record learned facts and knowledge updates
+- `record_experience` - Record learned facts and knowledge updates. AI provides description, embeddings generated synchronously.
 
 ### Proposal Generation
 
@@ -208,29 +189,53 @@ Add to `.cursor/mcp.json`:
 
 - `send_teams_validation` - Send validation requests via Teams Adaptive Cards
 - `send_email_validation` - Send validation requests via email
-- `process_validation_response` - Process validation responses and update knowledge
+- `process_validation_response` - Store raw validation responses (AI processes them)
 
-## Validation Workflow
+## Validation Workflow (AI-First)
 
 1. **Proposal Generation**: AI generates proposal and identifies resources needed
 2. **Validation Request**: System sends validation requests via Teams or email
 3. **Response Collection**: Recipients respond with approvals or corrections
-4. **Knowledge Update**: Corrections automatically create experience entries with embeddings
-5. **Future Improvement**: Updated knowledge improves future proposal generation
+4. **Webhook Storage**: Edge functions store raw response data in `validation_requests` table
+5. **AI Processing**: AI reads the response and calls `record_experience()` with:
+   - Clear description of what changed
+   - Confidence score
+   - Entity associations
+   - Embedding generated synchronously
+6. **Review Queue**: New experiences go to review queue (`is_validated = false`)
+7. **Manual Approval**: Admin reviews and approves experiences
+8. **Search Integration**: Approved experiences appear in search results
+
+## Deployment Model
+
+**Single-Tenant Per Client:**
+
+Each client gets:
+- Their own Supabase project
+- Their own database instance
+- Their own MCP server deployment
+- Complete data isolation at infrastructure level
+
+**Benefits:**
+- Zero tenant-related bugs
+- Client-specific customization possible
+- Simple backups (one database per client)
+- Clear cost per client
+- No RLS complexity needed
 
 ## Security
 
-- **Row Level Security (RLS)**: All tables enforce tenant isolation
-- **JWT Authentication**: FastMCP validates Supabase JWTs
+- **Physical Isolation**: Each client has separate Supabase project
 - **Service Role Keys**: Never exposed to clients, only used server-side
 - **Webhook Validation**: Teams webhooks validate signatures
+- **Manual Review Gate**: Unvalidated experiences don't appear in search
 
 ## Performance
 
 - **HNSW Indexes**: Fast approximate nearest neighbor search for embeddings
 - **GIN Indexes**: Efficient full-text search
 - **Hybrid Search**: Combines semantic and keyword search for best results
-- **Background Processing**: Embeddings generated asynchronously
+- **Synchronous Embeddings**: Generated in <1 second during `record_experience()` call
 
 ## Monitoring
 
@@ -240,12 +245,10 @@ Query active validations:
 SELECT * FROM active_validations;
 ```
 
-Check embedding queue status:
+View pending reviews:
 
 ```sql
-SELECT status, COUNT(*) 
-FROM embedding_queue 
-GROUP BY status;
+SELECT * FROM pending_reviews;
 ```
 
 View recent AI learnings:
@@ -261,9 +264,10 @@ LIMIT 20;
 
 ### Embeddings Not Generating
 
-1. Check `embedding_queue` table for failed jobs
-2. Verify OpenAI API key is set correctly
-3. Check Edge Function logs in Supabase Dashboard
+Embeddings are generated synchronously in `record_experience()`. If they fail:
+1. Verify OpenAI API key is set correctly
+2. Check network connectivity to OpenAI API
+3. Review error messages in tool responses
 
 ### Validation Not Working
 
@@ -273,9 +277,10 @@ LIMIT 20;
 
 ### Search Returns No Results
 
-1. Verify embeddings have been generated for your data
-2. Check that `tenant_id` is correctly set in JWT claims
+1. Verify experiences have been created and validated (`is_validated = true`)
+2. Check that embeddings were generated (should be automatic)
 3. Lower `match_threshold` parameter if needed
+4. Use `pending_reviews` view to see unvalidated experiences
 
 ## License
 

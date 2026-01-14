@@ -2,7 +2,7 @@
 -- Proposal Generation MCP Server - Supabase Database Schema
 -- ============================================================================
 -- This schema supports a self-updating knowledge base for AI-powered proposal
--- generation with validation workflows and multi-tenant isolation.
+-- generation with validation workflows. Single-tenant deployment model.
 -- ============================================================================
 
 -- Enable required extensions
@@ -57,7 +57,6 @@ CREATE TYPE proposal_status AS ENUM (
 -- Internal Resources: Staff, tools, and assets owned by the company
 CREATE TABLE internal_resources (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL,
     
     -- Resource identification
     name TEXT NOT NULL,
@@ -109,7 +108,6 @@ CREATE TABLE internal_resources (
 -- External Resources: Vendors and contractors
 CREATE TABLE external_resources (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL,
     
     -- Vendor identification
     vendor_name TEXT NOT NULL,
@@ -177,7 +175,6 @@ CREATE TABLE account_managers (
 -- Policies: Business rules and requirements for proposals
 CREATE TABLE policies (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL,
     
     -- Policy identification
     policy_name TEXT NOT NULL,
@@ -227,11 +224,10 @@ CREATE TABLE policies (
 -- Experience: AI-learned facts and knowledge updates
 CREATE TABLE experience (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL,
     
     -- Experience content
     description TEXT NOT NULL,
-    keywords TEXT[] NOT NULL,  -- Manually or AI-extracted keywords
+    keywords TEXT[],  -- AI-extracted keywords (optional, AI can provide)
     
     -- Association with other entities
     entity_type TEXT CHECK (entity_type IN (
@@ -256,17 +252,21 @@ CREATE TABLE experience (
     -- Full-text search
     search_vector TSVECTOR GENERATED ALWAYS AS (
         setweight(to_tsvector('english', coalesce(description, '')), 'A') ||
-        setweight(to_tsvector('english', array_to_string(keywords, ' ')), 'B')
+        setweight(to_tsvector('english', coalesce(array_to_string(keywords, ' '), '')), 'B')
     ) STORED,
     
     -- Semantic search
     embedding HALFVEC(1536),
     
+    -- Manual review gate
+    is_validated BOOLEAN DEFAULT FALSE,  -- Only validated experiences appear in search
+    reviewed_by TEXT,  -- User who reviewed (optional)
+    reviewed_at TIMESTAMPTZ,  -- When reviewed
+    
     -- Metadata
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     created_by TEXT DEFAULT 'ai',  -- 'ai' or user UUID
-    is_validated BOOLEAN DEFAULT false,  -- Human validation flag
     validation_notes TEXT
 );
 
@@ -277,7 +277,6 @@ CREATE TABLE experience (
 -- RFPs: Parsed request for proposal documents
 CREATE TABLE rfps (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL,
     
     -- RFP identification
     rfp_number TEXT,
@@ -311,7 +310,6 @@ CREATE TABLE rfps (
 -- Proposals: Generated proposal documents
 CREATE TABLE proposals (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL,
     rfp_id UUID REFERENCES rfps(id),
     
     -- Proposal details
@@ -350,7 +348,6 @@ CREATE TABLE proposals (
 -- Validation Requests: Track validation workflow
 CREATE TABLE validation_requests (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL,
     
     -- What's being validated
     proposal_id UUID REFERENCES proposals(id) ON DELETE CASCADE,
@@ -370,11 +367,11 @@ CREATE TABLE validation_requests (
     message_id TEXT,  -- External message ID for tracking
     sent_at TIMESTAMPTZ,
     
-    -- Response
+    -- Response (stored raw, AI processes it)
     validation_status validation_status DEFAULT 'pending',
     response_received_at TIMESTAMPTZ,
-    response_data JSONB,  -- Structured response
-    corrections_provided TEXT,
+    response_data JSONB,  -- Raw structured response from user
+    corrections_provided TEXT,  -- Raw text corrections
     
     -- Experience generation
     experience_created BOOLEAN DEFAULT false,
@@ -395,7 +392,6 @@ CREATE TABLE validation_requests (
 -- Audit Log: Track all changes (especially AI updates)
 CREATE TABLE audit_log (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL,
     
     -- What changed
     table_name TEXT NOT NULL,
@@ -416,31 +412,9 @@ CREATE TABLE audit_log (
     user_agent TEXT
 );
 
--- Embedding Queue: Track embedding generation jobs
-CREATE TABLE embedding_queue (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    table_name TEXT NOT NULL,
-    record_id UUID NOT NULL,
-    priority INTEGER DEFAULT 5,  -- 1=highest, 10=lowest
-    
-    status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'completed', 'failed')),
-    retry_count INTEGER DEFAULT 0,
-    error_message TEXT,
-    
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    processed_at TIMESTAMPTZ
-);
-
 -- ============================================================================
 -- INDEXES FOR PERFORMANCE
 -- ============================================================================
-
--- Tenant isolation indexes
-CREATE INDEX idx_internal_resources_tenant ON internal_resources(tenant_id);
-CREATE INDEX idx_external_resources_tenant ON external_resources(tenant_id);
-CREATE INDEX idx_policies_tenant ON policies(tenant_id);
-CREATE INDEX idx_experience_tenant ON experience(tenant_id);
-CREATE INDEX idx_proposals_tenant ON proposals(tenant_id);
 
 -- Full-text search indexes
 CREATE INDEX idx_internal_resources_fts ON internal_resources USING gin(search_vector);
@@ -478,89 +452,13 @@ CREATE INDEX idx_experience_entity ON experience(entity_type, entity_id);
 -- Status and workflow indexes
 CREATE INDEX idx_validation_requests_status ON validation_requests(validation_status, expires_at);
 CREATE INDEX idx_proposals_status ON proposals(proposal_status);
-CREATE INDEX idx_embedding_queue_status ON embedding_queue(status, priority);
+CREATE INDEX idx_experience_validated ON experience(is_validated) WHERE is_validated = TRUE;
 
 -- Array search indexes (GIN for contains operations)
 CREATE INDEX idx_internal_resources_skills ON internal_resources USING gin(skills jsonb_path_ops);
 CREATE INDEX idx_external_resources_service_areas ON external_resources USING gin(service_areas);
 CREATE INDEX idx_policies_tags ON policies USING gin(tags);
 CREATE INDEX idx_experience_keywords ON experience USING gin(keywords);
-
--- ============================================================================
--- ROW LEVEL SECURITY (RLS) POLICIES
--- ============================================================================
-
--- Enable RLS on all tables
-ALTER TABLE internal_resources ENABLE ROW LEVEL SECURITY;
-ALTER TABLE external_resources ENABLE ROW LEVEL SECURITY;
-ALTER TABLE account_managers ENABLE ROW LEVEL SECURITY;
-ALTER TABLE policies ENABLE ROW LEVEL SECURITY;
-ALTER TABLE experience ENABLE ROW LEVEL SECURITY;
-ALTER TABLE rfps ENABLE ROW LEVEL SECURITY;
-ALTER TABLE proposals ENABLE ROW LEVEL SECURITY;
-ALTER TABLE validation_requests ENABLE ROW LEVEL SECURITY;
-ALTER TABLE audit_log ENABLE ROW LEVEL SECURITY;
-
--- Tenant isolation policy (applies to all authenticated users)
-CREATE POLICY "Tenant isolation" ON internal_resources
-    FOR ALL TO authenticated
-    USING (tenant_id = (auth.jwt() ->> 'tenant_id')::uuid);
-
-CREATE POLICY "Tenant isolation" ON external_resources
-    FOR ALL TO authenticated
-    USING (tenant_id = (auth.jwt() ->> 'tenant_id')::uuid);
-
-CREATE POLICY "Tenant isolation via external_resource" ON account_managers
-    FOR ALL TO authenticated
-    USING (
-        EXISTS (
-            SELECT 1 FROM external_resources 
-            WHERE id = account_managers.external_resource_id 
-            AND tenant_id = (auth.jwt() ->> 'tenant_id')::uuid
-        )
-    );
-
-CREATE POLICY "Tenant isolation" ON policies
-    FOR ALL TO authenticated
-    USING (tenant_id = (auth.jwt() ->> 'tenant_id')::uuid);
-
-CREATE POLICY "Tenant isolation" ON experience
-    FOR ALL TO authenticated
-    USING (tenant_id = (auth.jwt() ->> 'tenant_id')::uuid);
-
-CREATE POLICY "Tenant isolation" ON rfps
-    FOR ALL TO authenticated
-    USING (tenant_id = (auth.jwt() ->> 'tenant_id')::uuid);
-
-CREATE POLICY "Tenant isolation" ON proposals
-    FOR ALL TO authenticated
-    USING (tenant_id = (auth.jwt() ->> 'tenant_id')::uuid);
-
-CREATE POLICY "Tenant isolation" ON validation_requests
-    FOR ALL TO authenticated
-    USING (tenant_id = (auth.jwt() ->> 'tenant_id')::uuid);
-
-CREATE POLICY "Tenant isolation" ON audit_log
-    FOR ALL TO authenticated
-    USING (tenant_id = (auth.jwt() ->> 'tenant_id')::uuid);
-
--- AI write access to experience table
-CREATE POLICY "AI can create experience" ON experience
-    FOR INSERT TO authenticated
-    WITH CHECK (true);  -- Additional app-level validation in FastMCP
-
-CREATE POLICY "AI can update experience" ON experience
-    FOR UPDATE TO authenticated
-    USING (created_by = 'ai');
-
--- Service role bypass (for Edge Functions)
-CREATE POLICY "Service role bypass" ON experience
-    FOR ALL TO service_role
-    USING (true);
-
-CREATE POLICY "Service role bypass" ON validation_requests
-    FOR ALL TO service_role
-    USING (true);
 
 -- ============================================================================
 -- TRIGGERS
@@ -600,51 +498,19 @@ CREATE TRIGGER update_validation_requests_updated_at
     BEFORE UPDATE ON validation_requests
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
--- Queue embedding generation on INSERT/UPDATE
-CREATE OR REPLACE FUNCTION queue_embedding_job()
-RETURNS TRIGGER AS $$
-BEGIN
-    INSERT INTO embedding_queue (table_name, record_id, priority)
-    VALUES (TG_TABLE_NAME, NEW.id, 5)
-    ON CONFLICT DO NOTHING;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
--- Apply embedding queue trigger to tables with embeddings
-CREATE TRIGGER queue_internal_resources_embedding
-    AFTER INSERT OR UPDATE OF description ON internal_resources
-    FOR EACH ROW EXECUTE FUNCTION queue_embedding_job();
-
-CREATE TRIGGER queue_external_resources_embedding
-    AFTER INSERT OR UPDATE OF description ON external_resources
-    FOR EACH ROW EXECUTE FUNCTION queue_embedding_job();
-
-CREATE TRIGGER queue_policies_embedding
-    AFTER INSERT OR UPDATE OF description, requirements ON policies
-    FOR EACH ROW EXECUTE FUNCTION queue_embedding_job();
-
-CREATE TRIGGER queue_experience_embedding
-    AFTER INSERT OR UPDATE OF description ON experience
-    FOR EACH ROW EXECUTE FUNCTION queue_embedding_job();
-
-CREATE TRIGGER queue_rfp_embedding
-    AFTER INSERT OR UPDATE OF parsed_markdown ON rfps
-    FOR EACH ROW EXECUTE FUNCTION queue_embedding_job();
-
 -- Audit log trigger for experience table
 CREATE OR REPLACE FUNCTION log_experience_changes()
 RETURNS TRIGGER AS $$
 BEGIN
     IF TG_OP = 'INSERT' THEN
-        INSERT INTO audit_log (tenant_id, table_name, record_id, action, changed_by, new_values)
-        VALUES (NEW.tenant_id, TG_TABLE_NAME, NEW.id, 'INSERT', NEW.created_by, to_jsonb(NEW));
+        INSERT INTO audit_log (table_name, record_id, action, changed_by, new_values)
+        VALUES (TG_TABLE_NAME, NEW.id, 'INSERT', NEW.created_by, to_jsonb(NEW));
     ELSIF TG_OP = 'UPDATE' THEN
-        INSERT INTO audit_log (tenant_id, table_name, record_id, action, changed_by, old_values, new_values)
-        VALUES (NEW.tenant_id, TG_TABLE_NAME, NEW.id, 'UPDATE', NEW.created_by, to_jsonb(OLD), to_jsonb(NEW));
+        INSERT INTO audit_log (table_name, record_id, action, changed_by, old_values, new_values)
+        VALUES (TG_TABLE_NAME, NEW.id, 'UPDATE', NEW.created_by, to_jsonb(OLD), to_jsonb(NEW));
     ELSIF TG_OP = 'DELETE' THEN
-        INSERT INTO audit_log (tenant_id, table_name, record_id, action, changed_by, old_values)
-        VALUES (OLD.tenant_id, TG_TABLE_NAME, OLD.id, 'DELETE', 'system', to_jsonb(OLD));
+        INSERT INTO audit_log (table_name, record_id, action, changed_by, old_values)
+        VALUES (TG_TABLE_NAME, OLD.id, 'DELETE', 'system', to_jsonb(OLD));
     END IF;
     RETURN NULL;
 END;
@@ -663,8 +529,7 @@ CREATE OR REPLACE FUNCTION search_internal_resources(
     query_text TEXT,
     query_embedding HALFVEC(1536),
     match_threshold FLOAT DEFAULT 0.7,
-    match_count INT DEFAULT 10,
-    p_tenant_id UUID DEFAULT NULL
+    match_count INT DEFAULT 10
 )
 RETURNS TABLE (
     id UUID,
@@ -685,8 +550,7 @@ BEGIN
             1 - (ir.embedding <=> query_embedding) AS similarity,
             ROW_NUMBER() OVER (ORDER BY ir.embedding <=> query_embedding) AS rank
         FROM internal_resources ir
-        WHERE ir.tenant_id = COALESCE(p_tenant_id, (auth.jwt() ->> 'tenant_id')::uuid)
-            AND ir.is_active = true
+        WHERE ir.is_active = true
             AND 1 - (ir.embedding <=> query_embedding) > match_threshold
     ),
     fulltext_search AS (
@@ -698,8 +562,7 @@ BEGIN
             ts_rank(ir.search_vector, websearch_to_tsquery('english', query_text)) AS similarity,
             ROW_NUMBER() OVER (ORDER BY ts_rank(ir.search_vector, websearch_to_tsquery('english', query_text)) DESC) AS rank
         FROM internal_resources ir
-        WHERE ir.tenant_id = COALESCE(p_tenant_id, (auth.jwt() ->> 'tenant_id')::uuid)
-            AND ir.is_active = true
+        WHERE ir.is_active = true
             AND ir.search_vector @@ websearch_to_tsquery('english', query_text)
     )
     SELECT 
@@ -715,15 +578,15 @@ BEGIN
     ORDER BY rank DESC
     LIMIT match_count;
 END;
-$$ LANGUAGE plpgsql STABLE SECURITY DEFINER;
+$$ LANGUAGE plpgsql STABLE;
 
 -- Hybrid search for experience (most frequently used by AI)
+-- Only returns validated experiences unless explicitly requested
 CREATE OR REPLACE FUNCTION search_experience(
     query_text TEXT,
     query_embedding HALFVEC(1536),
     match_threshold FLOAT DEFAULT 0.6,
     match_count INT DEFAULT 20,
-    p_tenant_id UUID DEFAULT NULL,
     p_entity_type TEXT DEFAULT NULL
 )
 RETURNS TABLE (
@@ -753,7 +616,7 @@ BEGIN
             1 - (e.embedding <=> query_embedding) AS similarity,
             ROW_NUMBER() OVER (ORDER BY e.embedding <=> query_embedding) AS rank
         FROM experience e
-        WHERE e.tenant_id = COALESCE(p_tenant_id, (auth.jwt() ->> 'tenant_id')::uuid)
+        WHERE e.is_validated = TRUE  -- Only validated experiences in search
             AND (p_entity_type IS NULL OR e.entity_type = p_entity_type)
             AND 1 - (e.embedding <=> query_embedding) > match_threshold
     ),
@@ -770,7 +633,7 @@ BEGIN
             ts_rank(e.search_vector, websearch_to_tsquery('english', query_text)) AS similarity,
             ROW_NUMBER() OVER (ORDER BY ts_rank(e.search_vector, websearch_to_tsquery('english', query_text)) DESC) AS rank
         FROM experience e
-        WHERE e.tenant_id = COALESCE(p_tenant_id, (auth.jwt() ->> 'tenant_id')::uuid)
+        WHERE e.is_validated = TRUE  -- Only validated experiences in search
             AND (p_entity_type IS NULL OR e.entity_type = p_entity_type)
             AND e.search_vector @@ websearch_to_tsquery('english', query_text)
     )
@@ -790,10 +653,7 @@ BEGIN
     ORDER BY rank DESC
     LIMIT match_count;
 END;
-$$ LANGUAGE plpgsql STABLE SECURITY DEFINER;
-
--- Similar hybrid search functions for external_resources and policies
--- (Pattern is identical, omitted for brevity - implement following same structure)
+$$ LANGUAGE plpgsql STABLE;
 
 -- ============================================================================
 -- USEFUL VIEWS
@@ -871,6 +731,24 @@ FROM experience e
 WHERE e.entity_type IS NOT NULL AND e.entity_id IS NOT NULL
 GROUP BY e.entity_type, e.entity_id, e.entity_name;
 
+-- View: Pending reviews (for admin review UI)
+CREATE VIEW pending_reviews AS
+SELECT 
+    e.id,
+    e.description,
+    e.keywords,
+    e.entity_type,
+    e.entity_id,
+    e.entity_name,
+    e.confidence_score,
+    e.source_type,
+    e.source_id,
+    e.created_at,
+    e.created_by
+FROM experience e
+WHERE e.is_validated = FALSE
+ORDER BY e.created_at DESC;
+
 -- ============================================================================
 -- COMMENTS FOR DOCUMENTATION
 -- ============================================================================
@@ -878,30 +756,13 @@ GROUP BY e.entity_type, e.entity_id, e.entity_name;
 COMMENT ON TABLE internal_resources IS 'Staff, tools, assets, and facilities owned by the company. Admin-managed only.';
 COMMENT ON TABLE external_resources IS 'External vendors and contractors with approval status. Admin-managed only.';
 COMMENT ON TABLE policies IS 'Business rules and requirements for proposal generation. Admin-managed only.';
-COMMENT ON TABLE experience IS 'AI-learned facts and knowledge updates. Primary AI-writable table.';
-COMMENT ON TABLE validation_requests IS 'Tracks validation workflow via email/Teams for capability verification.';
+COMMENT ON TABLE experience IS 'AI-learned facts and knowledge updates. Primary AI-writable table. Only validated experiences appear in search.';
+COMMENT ON TABLE validation_requests IS 'Tracks validation workflow via email/Teams. Stores raw responses for AI to process.';
 COMMENT ON TABLE proposals IS 'Generated proposals with resource assignments and pricing.';
-COMMENT ON TABLE embedding_queue IS 'Background job queue for embedding generation on content updates.';
 COMMENT ON TABLE audit_log IS 'Complete audit trail of all changes, especially AI updates to experience table.';
 
 COMMENT ON COLUMN experience.confidence_score IS 'AI confidence in this knowledge (0.0-1.0). Lower scores may need human validation.';
+COMMENT ON COLUMN experience.is_validated IS 'Only validated experiences appear in search results. Unvalidated entries go to review queue.';
 COMMENT ON COLUMN experience.supersedes_experience_id IS 'Previous version of this experience if updated based on new information.';
 COMMENT ON COLUMN validation_requests.expires_at IS 'Validation requests expire after 7 days by default.';
-
--- ============================================================================
--- INITIAL DATA (Optional)
--- ============================================================================
-
--- Example: Insert default policies that apply to all proposals
--- INSERT INTO policies (tenant_id, policy_name, policy_category, description, requirements, policy_owner_name, policy_owner_email, applies_to, tags)
--- VALUES (
---     'your-tenant-id'::uuid,
---     'Minimum Profit Margin',
---     'Pricing',
---     'All proposals must maintain minimum 15% profit margin',
---     'Calculate total costs and ensure final price achieves 15% margin after all expenses',
---     'CFO',
---     'cfo@yourcompany.com',
---     ARRAY['all_proposals'],
---     ARRAY['pricing', 'profitability', 'financial']
--- );
+COMMENT ON COLUMN validation_requests.response_data IS 'Raw response data from user. AI processes this to create experience entries.';

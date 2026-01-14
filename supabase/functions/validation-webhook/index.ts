@@ -24,7 +24,7 @@ serve(async (req) => {
       const approval_status = data.approval_status
       const corrections = data.corrections
       
-      // Update validation request
+      // Store raw response data - AI will process it
       const { data: validation } = await supabase
         .from('validation_requests')
         .update({
@@ -50,68 +50,10 @@ serve(async (req) => {
         )
       }
       
-      // If corrections provided, create experience and update entity
-      if (corrections && corrections.trim() !== '') {
-        // Generate embedding
-        const embeddingResponse = await fetch('https://api.openai.com/v1/embeddings', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${Deno.env.get('OPENAI_API_KEY')}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            model: 'text-embedding-3-small',
-            input: corrections
-          })
-        })
-        
-        if (!embeddingResponse.ok) {
-          throw new Error('Failed to generate embedding')
-        }
-        
-        const embeddingData = await embeddingResponse.json()
-        
-        // Extract keywords (simple approach)
-        const keywords = corrections
-          .toLowerCase()
-          .split(/\s+/)
-          .filter(w => w.length > 4)
-          .slice(0, 10)
-        
-        // Create experience entry
-        const { data: experience } = await supabase
-          .from('experience')
-          .insert({
-            tenant_id: validation.tenant_id,
-            description: `Validation correction: ${corrections}`,
-            keywords,
-            entity_type: validation.entity_type,
-            entity_id: validation.entity_id,
-            source_type: 'validation_response',
-            source_id: validation_id,
-            confidence_score: 0.95,
-            embedding: embeddingData.data[0].embedding,
-            created_by: 'ai'
-          })
-          .select()
-          .single()
-        
-        if (experience) {
-          // Link experience to validation
-          await supabase
-            .from('validation_requests')
-            .update({
-              experience_created: true,
-              experience_id: experience.id
-            })
-            .eq('id', validation_id)
-        }
-      }
-      
       return new Response(
         JSON.stringify({ 
           type: 'message',
-          text: '✅ Thank you! Your validation response has been recorded.'
+          text: '✅ Thank you! Your validation response has been recorded. The AI will process your feedback.'
         }),
         { 
           status: 200,

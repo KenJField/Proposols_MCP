@@ -10,8 +10,6 @@ from src.services.email import (
     send_html_email,
     generate_validation_token
 )
-from src.tools.experience import record_experience
-from src.utils.keywords import extract_keywords
 
 
 # Initialize Supabase client
@@ -137,32 +135,35 @@ async def process_validation_response(
     validation_id: str,
     approved: bool,
     corrections: Optional[str] = None,
-    updated_information: Optional[Dict] = None,
-    ctx: Optional[Context] = None
+    updated_information: Optional[Dict] = None
 ) -> Dict:
     """
-    Process a validation response and update knowledge base if corrections provided.
-    This tool would typically be called by a webhook handler.
+    Store a validation response. This just stores the raw response data.
+    The AI should then read this response and call record_experience() to process it.
+    
+    This tool is typically called by a webhook handler to store raw responses.
+    The AI will process the response and extract learnings.
     
     Args:
         validation_id: ID of the validation request
         approved: Whether the information was approved
-        corrections: Text description of corrections
-        updated_information: Structured updated data
-        ctx: FastMCP context (optional)
+        corrections: Text description of corrections (raw, stored as-is)
+        updated_information: Structured updated data (raw, stored as-is)
         
     Returns:
         Dictionary with success status and details
     """
-    # Update validation request
+    # Update validation request with raw response data
     validation_update = {
         'validation_status': 'approved' if approved else 'rejected',
         'response_received_at': 'now()',
-        'corrections_provided': corrections
+        'corrections_provided': corrections,
+        'response_data': {
+            'approved': approved,
+            'corrections': corrections,
+            'updated_information': updated_information
+        }
     }
-    
-    if updated_information:
-        validation_update['response_data'] = updated_information
     
     validation_result = supabase.table('validation_requests').update(
         validation_update
@@ -171,41 +172,8 @@ async def process_validation_response(
     if not validation_result.data:
         raise ValueError(f"Validation request {validation_id} not found")
     
-    val_data = validation_result.data[0]
-    
-    # If corrections provided, create experience entry and update source
-    if corrections or updated_information:
-        # Extract key learnings from corrections
-        keywords = extract_keywords(corrections) if corrections else []
-        
-        # Record experience
-        experience = await record_experience(
-            description=corrections or "Updated information from validation",
-            keywords=keywords,
-            entity_type=val_data['entity_type'],
-            entity_id=val_data['entity_id'],
-            entity_name=val_data.get('current_information', {}).get('name'),
-            source_type='validation_response',
-            confidence_score=0.95,  # High confidence from human validation
-            source_id=validation_id,
-            tenant_id=val_data['tenant_id'],
-            ctx=ctx
-        )
-        
-        # Link experience to validation
-        supabase.table('validation_requests').update({
-            'experience_created': True,
-            'experience_id': experience['experience_id']
-        }).eq('id', validation_id).execute()
-        
-        # Update the source entity if structured data provided
-        if updated_information and val_data['entity_type'] == 'internal_resource':
-            supabase.table('internal_resources').update(
-                updated_information
-            ).eq('id', val_data['entity_id']).execute()
-    
     return {
         "success": True,
         "validation_id": validation_id,
-        "knowledge_updated": bool(corrections or updated_information)
+        "message": "Validation response stored. AI should process this and call record_experience() if corrections were provided."
     }

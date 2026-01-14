@@ -2,7 +2,6 @@
 
 import os
 from fastmcp import FastMCP
-from fastmcp.server.auth.providers.supabase import SupabaseProvider
 from src.config import Config
 
 # Import all tools
@@ -22,16 +21,9 @@ def create_server() -> FastMCP:
     # Validate configuration
     Config.validate()
     
-    # Set up FastMCP with Supabase auth
-    auth = SupabaseProvider(
-        project_url=Config.SUPABASE_URL,
-        algorithm="RS256",
-        required_scopes=["read", "write"]
-    )
-    
+    # Set up FastMCP (no auth needed for single-tenant deployment)
     mcp = FastMCP(
         name="ProposalKnowledgeBase",
-        auth=auth,
         stateless_http=Config.STATELESS_HTTP
     )
     
@@ -86,14 +78,13 @@ def create_server() -> FastMCP:
     @mcp.tool
     async def record_experience_tool(
         description: str,
-        keywords: list[str] | None = None,
-        entity_type: str | None = None,
         entity_id: str | None = None,
+        entity_type: str | None = None,
         entity_name: str | None = None,
+        confidence: float = 0.8,
+        requires_review: bool = True,
         source_type: str = "ai_inference",
-        confidence_score: float = 0.8,
-        source_id: str | None = None,
-        ctx = None
+        source_id: str | None = None
     ) -> dict:
         """
         Record a learned fact or knowledge update in the experience table.
@@ -101,24 +92,23 @@ def create_server() -> FastMCP:
         
         Args:
             description: Detailed description of the learned fact
-            keywords: Keywords for search and categorization (auto-extracted if not provided)
-            entity_type: Type of entity (internal_resource, external_resource, policy)
             entity_id: ID of the associated entity
+            entity_type: Type of entity (internal_resource, external_resource, policy)
             entity_name: Name of the associated entity for display
+            confidence: AI confidence in this fact (0.0-1.0)
+            requires_review: Whether this should go to review queue (default: True)
             source_type: How this knowledge was obtained (validation_response, rfp_analysis, etc.)
-            confidence_score: AI confidence in this fact (0.0-1.0)
             source_id: Reference to validation request, proposal, etc.
         """
         return await record_experience(
             description=description,
-            keywords=keywords,
-            entity_type=entity_type,
             entity_id=entity_id,
+            entity_type=entity_type,
             entity_name=entity_name,
+            confidence=confidence,
+            requires_review=requires_review,
             source_type=source_type,
-            confidence_score=confidence_score,
-            source_id=source_id,
-            ctx=ctx
+            source_id=source_id
         )
     
     # Register proposal tools
@@ -127,8 +117,7 @@ def create_server() -> FastMCP:
         document_url: str,
         rfp_number: str | None = None,
         client_name: str = "",
-        project_title: str = "",
-        ctx = None
+        project_title: str = ""
     ) -> dict:
         """
         Parse RFP document and extract structured requirements.
@@ -143,8 +132,7 @@ def create_server() -> FastMCP:
             document_url=document_url,
             rfp_number=rfp_number,
             client_name=client_name,
-            project_title=project_title,
-            ctx=ctx
+            project_title=project_title
         )
     
     @mcp.tool(task=True)  # Enable background task
@@ -229,14 +217,14 @@ def create_server() -> FastMCP:
         updated_information: dict | None = None
     ) -> dict:
         """
-        Process a validation response and update knowledge base if corrections provided.
-        This tool would typically be called by a webhook handler.
+        Store a validation response. AI should then call record_experience() to process it.
+        This tool is typically called by a webhook handler to store raw responses.
         
         Args:
             validation_id: ID of the validation request
             approved: Whether the information was approved
-            corrections: Text description of corrections
-            updated_information: Structured updated data
+            corrections: Text description of corrections (raw, stored as-is)
+            updated_information: Structured updated data (raw, stored as-is)
         """
         return await process_validation_response(
             validation_id=validation_id,

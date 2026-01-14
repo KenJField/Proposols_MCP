@@ -38,7 +38,7 @@ async def search_internal_resources(
     embedding_service = get_embedding_service()
     query_embedding = await embedding_service.generate_embedding(query)
     
-    # Call hybrid search function
+    # Call hybrid search function (no tenant_id parameter needed)
     result = supabase.rpc(
         'search_internal_resources',
         {
@@ -82,7 +82,7 @@ async def search_experience(
     embedding_service = get_embedding_service()
     query_embedding = await embedding_service.generate_embedding(query)
     
-    # Call hybrid search function
+    # Call hybrid search function (no tenant_id parameter needed)
     result = supabase.rpc(
         'search_experience',
         {

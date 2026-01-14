@@ -47,11 +47,12 @@ serve(async (req) => {
       return new Response('Invalid or expired validation link', { status: 404 })
     }
     
-    // Update validation
+    // Store raw response data - AI will process it
     await supabase
       .from('validation_requests')
       .update({
-        validation_status: approval_status,
+        validation_status: approval_status === 'approved' ? 'approved' : 
+                         approval_status === 'rejected' ? 'rejected' : 'updated',
         response_received_at: new Date().toISOString(),
         corrections_provided: corrections,
         response_data: {
@@ -61,62 +62,6 @@ serve(async (req) => {
         }
       })
       .eq('id', validation.id)
-    
-    // Create experience if corrections provided
-    if (corrections && corrections.trim() !== '') {
-      // Generate embedding
-      const embeddingResponse = await fetch('https://api.openai.com/v1/embeddings', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${Deno.env.get('OPENAI_API_KEY')}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          model: 'text-embedding-3-small',
-          input: corrections
-        })
-      })
-      
-      if (embeddingResponse.ok) {
-        const embeddingData = await embeddingResponse.json()
-        
-        // Extract keywords
-        const keywords = corrections
-          .toLowerCase()
-          .split(/\s+/)
-          .filter(w => w.length > 4)
-          .slice(0, 10)
-        
-        // Create experience entry
-        const { data: experience } = await supabase
-          .from('experience')
-          .insert({
-            tenant_id: validation.tenant_id,
-            description: `Validation correction: ${corrections}`,
-            keywords,
-            entity_type: validation.entity_type,
-            entity_id: validation.entity_id,
-            source_type: 'validation_response',
-            source_id: validation.id,
-            confidence_score: 0.95,
-            embedding: embeddingData.data[0].embedding,
-            created_by: 'ai'
-          })
-          .select()
-          .single()
-        
-        if (experience) {
-          // Link experience to validation
-          await supabase
-            .from('validation_requests')
-            .update({
-              experience_created: true,
-              experience_id: experience.id
-            })
-            .eq('id', validation.id)
-        }
-      }
-    }
     
     // Return success page
     return new Response(createSuccessPage(), {
@@ -146,7 +91,7 @@ async function getValidationByToken(token: string) {
 function createValidationForm(validation: any, token: string): string {
   const currentInfo = validation.current_information || {}
   const infoHtml = Object.entries(currentInfo)
-    .filter(([key]) => !['id', 'tenant_id', 'embedding', 'search_vector'].includes(key))
+    .filter(([key]) => !['id', 'embedding', 'search_vector'].includes(key))
     .map(([key, value]) => `<tr><td><strong>${key.replace(/_/g, ' ')}</strong></td><td>${value}</td></tr>`)
     .join('')
   

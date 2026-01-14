@@ -19,8 +19,7 @@ async def parse_rfp(
     document_url: str,
     rfp_number: Optional[str] = None,
     client_name: str = "",
-    project_title: str = "",
-    ctx: Optional[Context] = None
+    project_title: str = ""
 ) -> Dict:
     """
     Parse RFP document and extract structured requirements.
@@ -33,24 +32,13 @@ async def parse_rfp(
         rfp_number: Optional RFP number
         client_name: Name of the client
         project_title: Title of the project
-        ctx: FastMCP context (optional)
         
     Returns:
         Dictionary with rfp_id and parsed requirements
     """
-    # Extract tenant_id from context
-    # In FastMCP, tenant_id should come from JWT claims via SupabaseProvider
-    tenant_id = None
-    if ctx and hasattr(ctx, 'request_context'):
-        tenant_id = ctx.request_context.get("tenant_id")
-    
-    if not tenant_id:
-        raise ValueError("tenant_id is required. Ensure JWT contains tenant_id claim.")
-    
     # For now, create a basic RFP entry
     # In production, use LlamaParse to extract structured requirements
     rfp_data = {
-        'tenant_id': tenant_id,
         'rfp_number': rfp_number,
         'client_name': client_name or "Unknown Client",
         'project_title': project_title or "Untitled Project",
@@ -103,8 +91,6 @@ async def generate_proposal(
     rfp_result = supabase.table('rfps').select('*').eq('id', rfp_id).single().execute()
     rfp_data = rfp_result.data
     
-    tenant_id = rfp_data['tenant_id']
-    
     await ctx.report_progress(10, 100, "Searching for relevant resources")
     
     # Search for relevant internal resources
@@ -130,7 +116,6 @@ async def generate_proposal(
     )
     
     proposal_data = {
-        'tenant_id': tenant_id,
         'rfp_id': rfp_id,
         'proposal_title': f"Proposal for {rfp_data['project_title']}",
         'proposal_status': 'draft',
@@ -158,7 +143,6 @@ async def generate_proposal(
     
     for resource in resources:
         validation = {
-            'tenant_id': tenant_id,
             'proposal_id': proposal_id,
             'entity_type': 'internal_resource',
             'entity_id': resource['id'],
