@@ -56,27 +56,30 @@ class TestEmailService:
         assert len(token) > 20  # Should be a substantial token
     
     @patch('src.services.email.smtplib.SMTP')
-    def test_send_html_email_success(self, mock_smtp, monkeypatch):
+    def test_send_html_email_success(self, mock_smtp):
         """Test successful email sending."""
-        monkeypatch.setenv("SMTP_HOST", "smtp.example.com")
-        monkeypatch.setenv("SMTP_PORT", "587")
-        monkeypatch.setenv("SMTP_USER", "user")
-        monkeypatch.setenv("SMTP_PASSWORD", "pass")
-        monkeypatch.setenv("EMAIL_FROM", "from@example.com")
+        from src.services import email
         
-        mock_server = Mock()
-        mock_smtp.return_value.__enter__.return_value = mock_server
-        
-        send_html_email(
-            to_email="test@example.com",
-            subject="Test Subject",
-            html_body="<html><body>Test</body></html>"
-        )
-        
-        mock_smtp.assert_called_once()
-        mock_server.starttls.assert_called_once()
-        mock_server.login.assert_called_once()
-        mock_server.send_message.assert_called_once()
+        # Patch Config attributes in the email module
+        with patch.object(email.Config, 'SMTP_HOST', 'smtp.example.com'), \
+             patch.object(email.Config, 'SMTP_PORT', 587), \
+             patch.object(email.Config, 'SMTP_USER', 'user'), \
+             patch.object(email.Config, 'SMTP_PASSWORD', 'pass'), \
+             patch.object(email.Config, 'EMAIL_FROM', 'from@example.com'):
+            
+            mock_server = Mock()
+            mock_smtp.return_value.__enter__.return_value = mock_server
+            
+            send_html_email(
+                to_email="test@example.com",
+                subject="Test Subject",
+                html_body="<html><body>Test</body></html>"
+            )
+            
+            mock_smtp.assert_called_once()
+            mock_server.starttls.assert_called_once()
+            mock_server.login.assert_called_once()
+            mock_server.send_message.assert_called_once()
     
     def test_send_html_email_no_smtp_config(self, monkeypatch):
         """Test that missing SMTP config raises error."""

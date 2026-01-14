@@ -2,17 +2,25 @@
 
 import pytest
 import os
-from supabase import create_client
-from src.config import Config
+
+try:
+    from supabase import create_client
+    from src.config import Config
+    HAS_DEPENDENCIES = True
+except ImportError:
+    HAS_DEPENDENCIES = False
 
 
 @pytest.mark.integration
+@pytest.mark.skipif(not HAS_DEPENDENCIES, reason="Required dependencies not installed")
 class TestDatabaseIntegration:
     """Integration tests for Supabase database operations."""
     
     @pytest.fixture(autouse=True)
     def setup_client(self):
         """Set up Supabase client for integration tests."""
+        if not HAS_DEPENDENCIES:
+            pytest.skip("Required dependencies not installed")
         if not Config.SUPABASE_URL or not Config.SUPABASE_SERVICE_ROLE_KEY:
             pytest.skip("Supabase credentials not configured")
         
